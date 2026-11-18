@@ -409,7 +409,12 @@ how its conclusion follows from what is more established — do not submit conne
 derivation.`,
 	knowledge: `The graph holds TRUE ideas about the world, nothing else — never anything about the learner, the
 teacher, or this reading: not "the learner understands X" but X. A misconception enters as its TRUE
-correction. Each statement is one self-contained idea at full precision.`,
+correction. Each statement is one self-contained idea at full precision.
+
+LANGUAGE: write every name, statement and alias in German, whatever the language of the source, using
+Swiss Standard German orthography (never ß, always ss). Keep established technical terms, symbols and
+formulas as they are. When THE GRAPH SO FAR holds an idea in another language, still reference it by
+its id rather than restating it.`,
 	standalone: `Every idea must stand
 alone for a reader who never saw this source: names and statements may not lean on the source's own
 scaffolding (claim numbering, axiom tags, arc labels); a claim that only matters as part of how this
