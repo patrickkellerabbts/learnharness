@@ -20,7 +20,9 @@ directly because only their metadata is needed.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
+import tempfile
 import re
 import sys
 from dataclasses import dataclass, field
@@ -36,6 +38,8 @@ from graph import load_graph  # noqa: E402
 MARKER = "learnharness"
 OWN_NOTES = "## Eigene Notizen"
 OWN_NOTES_DEFAULT = f"{OWN_NOTES}\n\n"
+RELATED_SEPARATOR = "\n---\n## Verwandt"
+HUB = "[[Lernen]]"
 INVALID_NAME = re.compile(r'[\\/:*?"<>|#^\[\]]')
 FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.S)
 
@@ -142,8 +146,26 @@ def parse_frontmatter(text: str) -> dict[str, str]:
 
 
 def own_notes(text: str) -> str:
+    """The preserved block: from `## Eigene Notizen` up to the generated `## Verwandt` footer."""
     index = text.find(OWN_NOTES)
-    return text[index:] if index >= 0 else OWN_NOTES_DEFAULT
+    if index < 0:
+        return OWN_NOTES_DEFAULT
+    block = text[index:]
+    footer = block.find(RELATED_SEPARATOR)
+    return block[:footer] if footer >= 0 else block
+
+
+def read_own_notes(path: Path) -> str:
+    return own_notes(path.read_text(encoding="utf-8")) if path.exists() else OWN_NOTES_DEFAULT
+
+
+def related(**groups) -> list[str]:
+    """Vault convention (AGENTS.md → Vernetzung): every note ends with `## Verwandt`."""
+    lines = ["---", "## Verwandt"]
+    for label, links in groups.items():
+        if links:
+            lines.append(f"- {label.replace('_', ' ')}: {', '.join(links)}")
+    return lines
 
 
 def safe_name(name: str) -> str:
@@ -201,7 +223,7 @@ def mermaid_label(text: str) -> str:
 # ── rendering ────────────────────────────────────────────────────────────
 
 
-def render_session(s: Session, props: list[Path], chains: list[str], keep: str) -> str:
+def render_session(s: Session, props: list[Path], chains: list[str], keep: str, see_also: list[Path]) -> str:
     parts = [
         frontmatter(
             erstellt=s.created,
@@ -237,10 +259,12 @@ def render_session(s: Session, props: list[Path], chains: list[str], keep: str) 
     if chains:
         parts += ["", "## Begründungsketten", ""] + chains
     parts += ["", keep.rstrip("\n"), ""]
+    parts += related(Bereich=[HUB], Siehe_auch=[link(p) for p in see_also])
+    parts.append("")
     return "\n".join(parts)
 
 
-def render_proposition(node, derived_from, supports, sources, keep: str) -> str:
+def render_proposition(node, derived_from, supports, sources, keep: str, lessons: list[str]) -> str:
     parts = [
         frontmatter(
             erstellt=iso_date(node.get("createdAt")),
@@ -262,10 +286,12 @@ def render_proposition(node, derived_from, supports, sources, keep: str) -> str:
     if sources:
         parts += ["", "## Quellen", ""] + [f"- {s}" for s in sources]
     parts += ["", keep.rstrip("\n"), ""]
+    parts += related(Bereich=[HUB], Lektion=lessons)
+    parts.append("")
     return "\n".join(parts)
 
 
-def render_index(sessions, session_paths, node_count, chain_count) -> str:
+def render_index(sessions, session_paths, node_count, chain_count, keep: str) -> str:
     parts = [
         frontmatter(tags=["lernen"], quelle=MARKER, **{"lh-id": "index"}),
         "# Lernen",
@@ -280,7 +306,9 @@ def render_index(sessions, session_paths, node_count, chain_count) -> str:
     ]
     for s in sorted(sessions, key=lambda s: s.created, reverse=True):
         parts.append(f"- {s.created} · {link(session_paths[s.id])} ({s.kind})")
-    parts += ["", OWN_NOTES, ""]
+    parts += ["", keep.rstrip("\n"), ""]
+    parts += related(Siehe_auch=["[[LearnHarness-Integration]]"])
+    parts.append("")
     return "\n".join(parts)
 
 
@@ -295,7 +323,9 @@ def write(path: Path, content: str, dry_run: bool, stats: dict):
     stats["neu" if old is None else "aktualisiert"] += 1
     if not dry_run:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
+        temp = path.with_name(f".{path.name}.tmp")
+        temp.write_text(content, encoding="utf-8")
+        temp.replace(path)
 
 
 def export(root: Path, target: Path, dry_run: bool) -> dict:
@@ -334,7 +364,7 @@ def export(root: Path, target: Path, dry_run: bool) -> dict:
 
     for nid, n in nodes.items():
         path = prop_paths[nid]
-        keep = own_notes(path.read_text(encoding="utf-8")) if path.exists() else OWN_NOTES_DEFAULT
+        keep = read_own_notes(path)
         derived = []
         supports = []
         for c in chains:
@@ -345,11 +375,27 @@ def export(root: Path, target: Path, dry_run: bool) -> dict:
                 extra = f" (zusammen mit {', '.join(others)})" if others else ""
                 supports.append(f"- {link(prop_paths[c['conclusion']])}{extra}")
         origin = list(dict.fromkeys(p["chatId"] for p in n.get("provenance", [])))
-        write(path, render_proposition(n, derived, supports, [source_label(o) for o in origin], keep), dry_run, stats)
+        lessons_links = [link(session_paths[o]) for o in origin if o in session_paths]
+        write(
+            path,
+            render_proposition(n, derived, supports, [source_label(o) for o in origin], keep, lessons_links),
+            dry_run,
+            stats,
+        )
+
+    # Lessons sharing propositions are each other's "Siehe auch" (symmetric by construction).
+    lessons_of = {
+        nid: {p["chatId"] for p in n.get("provenance", []) if p["chatId"] in session_paths}
+        for nid, n in nodes.items()
+    }
 
     for s in sessions:
         path = session_paths[s.id]
-        keep = own_notes(path.read_text(encoding="utf-8")) if path.exists() else OWN_NOTES_DEFAULT
+        keep = read_own_notes(path)
+        see_also = sorted(
+            {session_paths[o] for chats_ in lessons_of.values() if s.id in chats_ for o in chats_ if o != s.id},
+            key=lambda p: p.stem.lower(),
+        )
         mine = [
             nid for nid, n in nodes.items() if any(p["chatId"] == s.id for p in n.get("provenance", []))
         ]
@@ -360,13 +406,14 @@ def export(root: Path, target: Path, dry_run: bool) -> dict:
             for c in chains
             if c["conclusion"] in mine_set or any(p["chatId"] == s.id for p in c.get("provenance", []))
         ]
-        write(path, render_session(s, my_props, my_chains, keep), dry_run, stats)
+        write(path, render_session(s, my_props, my_chains, keep, see_also), dry_run, stats)
 
     index = target / "Lernen.md"
     if index.exists() and parse_frontmatter(index.read_text(encoding="utf-8")).get("quelle") != MARKER:
         print(f"Warnung: {index} ist keine generierte Notiz, nicht überschrieben", file=sys.stderr)
     else:
-        write(index, render_index(sessions, session_paths, len(nodes), len(chains)), dry_run, stats)
+        content = render_index(sessions, session_paths, len(nodes), len(chains), read_own_notes(index))
+        write(index, content, dry_run, stats)
 
     orphans = [
         p for folder, live in ((lessons, session_paths), (props, prop_paths))
@@ -392,6 +439,12 @@ def main() -> int:
     if vault not in target.parents:
         print("Fehler: --ziel muss innerhalb des Vaults liegen", file=sys.stderr)
         return 2
+    lock_file = open(Path(tempfile.gettempdir()) / "learnharness-obsidian-export.lock", "w")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print("Ein anderer Export läuft gerade, übersprungen.")
+        return 0
     try:
         root = data_root(args.data_dir)
         stats = export(root, target, args.dry_run)
@@ -401,7 +454,7 @@ def main() -> int:
 
     prefix = "[Probelauf] " if args.dry_run else ""
     print(
-        f"{prefix}{target.relative_to(vault)}: {stats['neu']} neu, "
+        f"{datetime.now():%Y-%m-%d %H:%M:%S} {prefix}{target.relative_to(vault)}: {stats['neu']} neu, "
         f"{stats['aktualisiert']} aktualisiert, {stats['unverändert']} unverändert"
     )
     for path in stats["verwaist"]:

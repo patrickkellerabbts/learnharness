@@ -14,6 +14,15 @@ python3 -B tools/obsidian-export/export.py --vault ~/projects/secondBrain/second
 | `--data-dir` | App-Daten (`~/Library/Application Support/LearnHarness/data`) | anderer Datenordner |
 | `--dry-run` | aus | nur zählen, nichts schreiben |
 
+## Automatisch exportieren
+
+```sh
+tools/obsidian-export/install-launchd.sh ~/projects/secondBrain/secondBrain   # installieren
+tools/obsidian-export/install-launchd.sh --uninstall                            # entfernen
+```
+
+Ein launchd-Dienst (`local.learnharness.obsidian-export`) beobachtet `graph/` und `chats/` im Datenordner und startet bei Änderungen den Export, höchstens einmal pro Minute. Er committet nichts. Das Log liegt in `~/Library/Logs/learnharness-obsidian-export.log`.
+
 ## Was entsteht
 
 - `Lernen.md`: Übersicht über alle Sessions
@@ -23,7 +32,8 @@ python3 -B tools/obsidian-export/export.py --vault ~/projects/secondBrain/second
 ## Regeln
 
 - Generierte Notizen haben `quelle: learnharness` und `lh-id` im Frontmatter. Nur solche Dateien werden überschrieben.
-- Alles ab `## Eigene Notizen` bleibt beim Neuschreiben erhalten.
+- Der Abschnitt `## Eigene Notizen` bleibt beim Neuschreiben erhalten, bis zur Fusszeile `---` / `## Verwandt`.
+- Jede Notiz endet mit `## Verwandt`, wie es die Vault-Konvention verlangt: Bereich `[[Lernen]]`, Lektion bzw. Lektionen mit gemeinsamen Aussagen.
 - Dateinamen bleiben stabil: Eine Notiz wird über ihre `lh-id` wiedergefunden, auch wenn sie umbenannt wurde.
 - Bei Namenskonflikten wird der Lektionstitel in Klammern angehängt. Bestehende fremde Dateien werden nie überschrieben.
 - Es wird nichts gelöscht. Notizen, deren Datensatz in LearnHarness verschwunden ist, meldet das Skript als „verwaist“.
