@@ -169,23 +169,35 @@ def related(**groups) -> list[str]:
 
 
 def safe_name(name: str) -> str:
-    cleaned = INVALID_NAME.sub("", name).replace("\n", " ").strip().strip(".")
+    cleaned = INVALID_NAME.sub("", swiss(name)).replace("\n", " ").strip().strip(".")
     return re.sub(r"\s+", " ", cleaned)[:120] or "Ohne Titel"
 
 
 class Folder:
     """One generated folder: maps lh-id -> file, keeps names stable."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, dry_run: bool = False):
         self.path = path
+        self.dry_run = dry_run
         self.by_id: dict[str, Path] = {}
         self.taken: set[str] = set()
         if path.is_dir():
             for file in path.glob("*.md"):
-                self.taken.add(file.stem.lower())
+                self.taken.add(file.stem.casefold())
                 fields = parse_frontmatter(file.read_text(encoding="utf-8"))
                 if fields.get("quelle") == MARKER and fields.get("lh-id"):
-                    self.by_id[fields["lh-id"]] = file
+                    self.by_id[fields["lh-id"]] = self._swiss_name(file)
+
+    def _swiss_name(self, file: Path) -> Path:
+        """Generated files from before the ß rule get their Swiss name (links follow via stem)."""
+        fixed = file.with_name(swiss(file.name))
+        if fixed == file or (fixed.exists() and not fixed.samefile(file)):
+            return file
+        if self.dry_run:
+            return fixed
+        file.rename(fixed)
+        self.taken.add(fixed.stem.casefold())
+        return fixed
 
     def assign(self, lh_id: str, wanted: str, suffix: str) -> Path:
         if lh_id in self.by_id:
@@ -193,8 +205,8 @@ class Folder:
         base = safe_name(wanted)
         candidates = [base, f"{base} ({safe_name(suffix)})"] + [f"{base} ({n})" for n in range(2, 100)]
         for stem in candidates:
-            if stem.lower() not in self.taken:
-                self.taken.add(stem.lower())
+            if stem.casefold() not in self.taken:
+                self.taken.add(stem.casefold())
                 path = self.path / f"{stem}.md"
                 self.by_id[lh_id] = path
                 return path
@@ -315,7 +327,23 @@ def render_index(sessions, session_paths, node_count, chain_count, keep: str) ->
 # ── main ─────────────────────────────────────────────────────────────────
 
 
+def swiss(text: str) -> str:
+    """Vault convention: Swiss orthography, never ß."""
+    return text.replace("ß", "ss").replace("ẞ", "SS")
+
+
+def swiss_generated(content: str) -> str:
+    """Normalize generated text but leave the learner's own notes untouched."""
+    start = content.find(OWN_NOTES)
+    if start < 0:
+        return swiss(content)
+    end = content.find(RELATED_SEPARATOR, start)
+    end = len(content) if end < 0 else end
+    return swiss(content[:start]) + content[start:end] + swiss(content[end:])
+
+
 def write(path: Path, content: str, dry_run: bool, stats: dict):
+    content = swiss_generated(content)
     old = path.read_text(encoding="utf-8") if path.exists() else None
     if old == content:
         stats["unverändert"] += 1
@@ -335,8 +363,8 @@ def export(root: Path, target: Path, dry_run: bool) -> dict:
     nodes = {n["id"]: n for n in graph["nodes"]}
     chains = [c for c in graph["chains"] if c["conclusion"] in nodes and all(p in nodes for p in c["premises"])]
 
-    lessons = Folder(target / "Lektionen")
-    props = Folder(target / "Aussagen")
+    lessons = Folder(target / "Lektionen", dry_run)
+    props = Folder(target / "Aussagen", dry_run)
     session_by_id = {s.id: s for s in sessions}
 
     session_paths = {
